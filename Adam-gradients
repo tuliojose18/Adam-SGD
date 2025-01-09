@@ -1,0 +1,81 @@
+from IPython.core.display import display, HTML
+display(HTML("<style>.container { width:80% !important; }</style>"))
+
+try:
+    import google.colab
+    import requests
+    url = 'https://raw.githubusercontent.com/dvgodoy/PyTorchStepByStep/master/config.py'
+    r = requests.get(url, allow_redirects=True)
+    open('config.py', 'wb').write(r.content)
+except ModuleNotFoundError:
+    pass
+
+from config import *
+config_chapter6()
+# This is needed to render the plots in this chapter
+from plots.chapter6 import *
+
+import numpy as np
+from PIL import Image
+from copy import deepcopy
+
+import torch
+import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+
+from torch.utils.data import DataLoader, TensorDataset, random_split
+from torchvision.transforms.v2 import Compose, ToImage, Normalize, \
+ToPILImage, Resize, ToDtype
+from torchvision.datasets import ImageFolder
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, \
+MultiStepLR, CyclicLR, LambdaLR
+
+from stepbystep.v2 import StepByStep
+from data_generation.rps import download_rps
+
+torch.manual_seed(42)
+model = nn.Sequential()
+model.add_module('linear', nn.Linear(1, 1))
+optimizer = optim.Adam(model.parameters(), lr=0.1)
+loss_fn = nn.MSELoss(reduction='mean')
+
+setattr(StepByStep, '_gradients', {})
+
+def capture_gradients(self, layers_to_hook):
+    if not isinstance(layers_to_hook, list):
+        layers_to_hook = [layers_to_hook]
+
+    modules = list(self.model.named_modules())
+    self._gradients = {}
+
+    def make_log_fn(name, parm_id):
+        def log_fn(grad):
+            self._gradients[name][parm_id].append(grad.tolist())
+            return
+        return log_fn
+
+    for name, layer in self.model.named_modules():
+        if name in layers_to_hook:
+            self._gradients.update({name: {}})
+            for parm_id, p in layer.named_parameters():
+                if p.requires_grad:
+                    self._gradients[name].update({parm_id: []})
+                    log_fn = make_log_fn(name, parm_id)
+                    self.handles[f'{name}.{parm_id}.grad'] = p.register_hook(log_fn)
+    return
+
+setattr(StepByStep, 'capture_gradients', capture_gradients)
+
+sbs_adam = StepByStep(model, loss_fn, optimizer)
+sbs_adam.set_loaders(train_loader, val_loader)
+sbs_adam.capture_gradients('linear')
+sbs_adam.train(10)
+sbs_adam.remove_hooks()
+
+gradients = np.array(sbs_adam._gradients['linear']['weight']).squeeze()
+corrected_gradients = calc_corrected_ewma(gradients, 19)
+corrected_sq_gradients = calc_corrected_ewma(np.power(gradients, 2), 1999)
+adapted_gradients = corrected_gradients / (np.sqrt(corrected_sq_gradients) + 1e-8)
+
+fig = figure17(gradients, corrected_gradients, corrected_sq_gradients, adapted_gradients)
